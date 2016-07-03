@@ -130,6 +130,11 @@ typedef struct MJpegDecodeContext {
     AVStereo3D *stereo3d; ///!< stereoscopic information (cached, since it is read before frame allocation)
 
     const AVPixFmtDescriptor *pix_desc;
+
+    uint16_t huff_code_dc_luminance[12];
+    uint16_t huff_code_dc_chrominance[12];
+    uint8_t  huff_size_dc_luminance[12];
+    uint8_t  huff_size_dc_chrominance[12];
 } MJpegDecodeContext;
 
 int ff_mjpeg_decode_init(AVCodecContext *avctx);

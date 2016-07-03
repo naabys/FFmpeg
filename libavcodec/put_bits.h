@@ -95,6 +95,16 @@ static inline int put_bits_left(PutBitContext* s)
     return (s->buf_end - s->buf_ptr) * 8 - 32 + s->bit_left;
 }
 
+static inline void grow_put_bits(PutBitContext *s, int buffer_size)
+{
+    int offset = s->buf_ptr - s->buf;
+    int new_size = offset + buffer_size + 32;
+
+    s->buf = av_realloc(s->buf, new_size);
+    init_put_bits(s, s->buf, new_size);
+    s->buf_ptr = s->buf + offset;
+}
+
 /**
  * Pad the end of the output stream with zeros.
  */
@@ -105,6 +115,8 @@ static inline void flush_put_bits(PutBitContext *s)
         s->bit_buf <<= s->bit_left;
 #endif
     while (s->bit_left < 32) {
+        if (s->buf_ptr >= s->buf_end)
+            grow_put_bits(s, 32);
         av_assert0(s->buf_ptr < s->buf_end);
 #ifdef BITSTREAM_WRITER_LE
         *s->buf_ptr++ = s->bit_buf;
@@ -154,6 +166,7 @@ static inline void put_bits(PutBitContext *s, int n, unsigned int value)
     unsigned int bit_buf;
     int bit_left;
 
+    value &= (1U << n) - 1;
     av_assert2(n <= 31 && value < (1U << n));
 
     bit_buf  = s->bit_buf;
@@ -163,13 +176,10 @@ static inline void put_bits(PutBitContext *s, int n, unsigned int value)
 #ifdef BITSTREAM_WRITER_LE
     bit_buf |= value << (32 - bit_left);
     if (n >= bit_left) {
-        if (3 < s->buf_end - s->buf_ptr) {
-            AV_WL32(s->buf_ptr, bit_buf);
-            s->buf_ptr += 4;
-        } else {
-            av_log(NULL, AV_LOG_ERROR, "Internal error, put_bits buffer too small\n");
-            av_assert2(0);
-        }
+        if (s->buf_end - s->buf_ptr < 4)
+            grow_put_bits(s, 32);
+        AV_WL32(s->buf_ptr, bit_buf);
+        s->buf_ptr += 4;
         bit_buf     = value >> bit_left;
         bit_left   += 32;
     }
@@ -181,13 +191,10 @@ static inline void put_bits(PutBitContext *s, int n, unsigned int value)
     } else {
         bit_buf   <<= bit_left;
         bit_buf    |= value >> (n - bit_left);
-        if (3 < s->buf_end - s->buf_ptr) {
-            AV_WB32(s->buf_ptr, bit_buf);
-            s->buf_ptr += 4;
-        } else {
-            av_log(NULL, AV_LOG_ERROR, "Internal error, put_bits buffer too small\n");
-            av_assert2(0);
-        }
+        if (s->buf_end - s->buf_ptr < 4)
+            grow_put_bits(s, 32);
+        AV_WB32(s->buf_ptr, bit_buf);
+        s->buf_ptr += 4;
         bit_left   += 32 - n;
         bit_buf     = value;
     }

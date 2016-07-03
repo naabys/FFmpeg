@@ -35,6 +35,8 @@
 #include "mathops.h"
 #include "vlc.h"
 
+#include "put_bits.h"
+
 /*
  * Safe bitstream reading:
  * optionally, the get_bits API can check to ensure that we
@@ -57,6 +59,8 @@ typedef struct GetBitContext {
     int index;
     int size_in_bits;
     int size_in_bits_plus8;
+
+    PutBitContext pb;
 } GetBitContext;
 
 /* Bitstream reader API docs:
@@ -201,6 +205,7 @@ static inline int get_bits_count(const GetBitContext *s)
     return s->index;
 }
 
+#if 0
 static inline void skip_bits_long(GetBitContext *s, int n)
 {
 #if UNCHECKED_BITSTREAM_READER
@@ -209,6 +214,9 @@ static inline void skip_bits_long(GetBitContext *s, int n)
     s->index += av_clip(n, -s->index, s->size_in_bits_plus8 - s->index);
 #endif
 }
+#else
+#define skip_bits_long(s, n) get_bits_long(s, n)
+#endif
 
 /**
  * Read MPEG-1 dc-style VLC (sign bit + mantissa with no MSB).
@@ -219,11 +227,14 @@ static inline int get_xbits(GetBitContext *s, int n)
 {
     register int sign;
     register int32_t cache;
+    register int tmp;
     OPEN_READER(re, s);
     av_assert2(n>0 && n<=25);
     UPDATE_CACHE(re, s);
     cache = GET_CACHE(re, s);
     sign  = ~cache >> 31;
+    tmp = SHOW_UBITS(re, s, n);
+    put_bits(&s->pb, n, tmp);
     LAST_SKIP_BITS(re, s, n);
     CLOSE_READER(re, s);
     return (NEG_USR32(sign ^ cache, n) ^ sign) - sign;
@@ -236,6 +247,7 @@ static inline int get_sbits(GetBitContext *s, int n)
     av_assert2(n>0 && n<=25);
     UPDATE_CACHE(re, s);
     tmp = SHOW_SBITS(re, s, n);
+    put_bits(&s->pb, n, tmp);
     LAST_SKIP_BITS(re, s, n);
     CLOSE_READER(re, s);
     return tmp;
@@ -251,6 +263,7 @@ static inline unsigned int get_bits(GetBitContext *s, int n)
     av_assert2(n>0 && n<=25);
     UPDATE_CACHE(re, s);
     tmp = SHOW_UBITS(re, s, n);
+    put_bits(&s->pb, n, tmp);
     LAST_SKIP_BITS(re, s, n);
     CLOSE_READER(re, s);
     return tmp;
@@ -271,6 +284,7 @@ static inline unsigned int get_bits_le(GetBitContext *s, int n)
     av_assert2(n>0 && n<=25);
     UPDATE_CACHE_LE(re, s);
     tmp = SHOW_UBITS_LE(re, s, n);
+    put_bits(&s->pb, n, tmp);
     LAST_SKIP_BITS(re, s, n);
     CLOSE_READER(re, s);
     return tmp;
@@ -289,6 +303,7 @@ static inline unsigned int show_bits(GetBitContext *s, int n)
     return tmp;
 }
 
+#if 0
 static inline void skip_bits(GetBitContext *s, int n)
 {
     OPEN_READER(re, s);
@@ -315,6 +330,10 @@ static inline unsigned int get_bits1(GetBitContext *s)
 
     return result;
 }
+#else
+#define skip_bits(s, n) get_bits(s, n)
+#define get_bits1(s) get_bits(s, 1)
+#endif
 
 static inline unsigned int show_bits1(GetBitContext *s)
 {
@@ -395,6 +414,8 @@ static inline int check_marker(void *logctx, GetBitContext *s, const char *msg)
     return bit;
 }
 
+extern PutBitContext glitch_pb;
+
 /**
  * Initialize GetBitContext.
  * @param buffer bitstream buffer, must be AV_INPUT_BUFFER_PADDING_SIZE bytes
@@ -403,7 +424,7 @@ static inline int check_marker(void *logctx, GetBitContext *s, const char *msg)
  * @param bit_size the size of the buffer in bits
  * @return 0 on success, AVERROR_INVALIDDATA if the buffer_size would overflow.
  */
-static inline int init_get_bits(GetBitContext *s, const uint8_t *buffer,
+static inline int init_get_bits_wrapper(const char *fn, int ln, const char *func, GetBitContext *s, const uint8_t *buffer,
                                 int bit_size)
 {
     int buffer_size;
@@ -423,8 +444,16 @@ static inline int init_get_bits(GetBitContext *s, const uint8_t *buffer,
     s->buffer_end         = buffer + buffer_size;
     s->index              = 0;
 
+    glitch_pb = s->pb;
+    if ( glitch_pb.buf != NULL )
+        flush_put_bits(&glitch_pb);
+    grow_put_bits(&glitch_pb, buffer_size);
+    s->pb = glitch_pb;
+
     return ret;
 }
+
+#define init_get_bits(s, buffer, bit_size) init_get_bits_wrapper(__FILE__, __LINE__, __func__, s, buffer, bit_size)
 
 /**
  * Initialize GetBitContext.
@@ -434,13 +463,15 @@ static inline int init_get_bits(GetBitContext *s, const uint8_t *buffer,
  * @param byte_size the size of the buffer in bytes
  * @return 0 on success, AVERROR_INVALIDDATA if the buffer_size would overflow.
  */
-static inline int init_get_bits8(GetBitContext *s, const uint8_t *buffer,
+static inline int init_get_bits8_wrapper(const char *fn, int ln, const char *func, GetBitContext *s, const uint8_t *buffer,
                                  int byte_size)
 {
     if (byte_size > INT_MAX / 8 || byte_size < 0)
         byte_size = -1;
-    return init_get_bits(s, buffer, byte_size * 8);
+    return init_get_bits_wrapper(fn, ln, func, s, buffer, byte_size * 8);
 }
+
+#define init_get_bits8(s, buffer, byte_size) init_get_bits8_wrapper(__FILE__, __LINE__, __func__, s, buffer, byte_size)
 
 static inline const uint8_t *align_get_bits(GetBitContext *s)
 {
@@ -465,24 +496,38 @@ static inline const uint8_t *align_get_bits(GetBitContext *s)
         n     = table[index][1];                                \
                                                                 \
         if (max_depth > 1 && n < 0) {                           \
+            unsigned int index2;                                \
+            put_bits(&((gb)->pb), bits, index);                 \
             LAST_SKIP_BITS(name, gb, bits);                     \
             UPDATE_CACHE(name, gb);                             \
                                                                 \
             nb_bits = -n;                                       \
                                                                 \
-            index = SHOW_UBITS(name, gb, nb_bits) + code;       \
+            index2 = SHOW_UBITS(name, gb, nb_bits);             \
+            index = index2 + code;                              \
             code  = table[index][0];                            \
             n     = table[index][1];                            \
             if (max_depth > 2 && n < 0) {                       \
+                put_bits(&((gb)->pb), nb_bits, index2);         \
                 LAST_SKIP_BITS(name, gb, nb_bits);              \
                 UPDATE_CACHE(name, gb);                         \
                                                                 \
                 nb_bits = -n;                                   \
                                                                 \
-                index = SHOW_UBITS(name, gb, nb_bits) + code;   \
+                index2 = SHOW_UBITS(name, gb, nb_bits);         \
+                index = index2 + code;                          \
                 code  = table[index][0];                        \
                 n     = table[index][1];                        \
+                put_bits(&((gb)->pb), n, index2 >> (nb_bits - n));\
             }                                                   \
+            else                                                \
+            {                                                   \
+                put_bits(&((gb)->pb), n, index2 >> (nb_bits - n));\
+            }                                                   \
+        }                                                       \
+        else                                                    \
+        {                                                       \
+            put_bits(&((gb)->pb), n, index >> (bits-n));        \
         }                                                       \
         SKIP_BITS(name, gb, n);                                 \
     } while (0)

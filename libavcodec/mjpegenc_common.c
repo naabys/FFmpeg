@@ -358,6 +358,7 @@ void ff_mjpeg_escape_FF(PutBitContext *pb, int start)
     if(ff_count==0) return;
 
     flush_put_bits(pb);
+    grow_put_bits(pb, ff_count);
     skip_put_bytes(pb, ff_count);
 
     for(i=size-1; ff_count; i--){
